@@ -8,42 +8,41 @@ from google.genai import types
 
 app = FastAPI(title="LedgerLenses API")
 
-# CORS setup - Vital for decoupled Cloudflare UI -> Render Backend communication
+# CORS setup for Cloudflare
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can restrict this to your .pages.dev URL later
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize Gemini Client (Pulls GEMINI_API_KEY from Render environment automatically)
+# Initialize Gemini Client
 client = genai.Client()
 
 @app.get("/health")
 async def health_check():
-    """The cold-start ping endpoint to wake the server up instantly."""
     return {"status": "hot", "system": "LedgerLenses Backend Running"}
 
 @app.post("/api/extract")
 async def extract_document(file: UploadFile = File(...)):
-    """Handles PDF and Image uploads, processes via Gemini, returns strict JSON."""
     
     if file.content_type not in ["application/pdf", "image/jpeg", "image/png", "image/jpg"]:
         raise HTTPException(status_code=400, detail="Unsupported file format. Please upload PDF, JPG, or PNG.")
 
     temp_file_path = ""
     try:
-        # 1. Save uploaded file temporarily so the Gemini API can read it
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file.filename.split('.')[-1]}") as temp_file:
+        # 1. Save uploaded file temporarily, preserving the extension for auto-mime detection
+        file_extension = file.filename.split('.')[-1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension}") as temp_file:
             content = await file.read()
             temp_file.write(content)
             temp_file_path = temp_file.name
 
-        # 2. Upload to Google AI Studio (Required for processing PDFs)
-        uploaded_doc = client.files.upload(file=temp_file_path, mime_type=file.content_type)
+        # 2. Upload to Google AI Studio (FIXED: Removed the deprecated mime_type keyword)
+        uploaded_doc = client.files.upload(file=temp_file_path)
 
-        # 3. Define the strict JSON Schema for the Indian FinTech context
+        # 3. Define the strict JSON Schema for Indian FinTech
         extraction_schema = {
             "type": "OBJECT",
             "properties": {
@@ -74,17 +73,18 @@ async def extract_document(file: UploadFile = File(...)):
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=extraction_schema,
-                temperature=0.0 # Force absolute determinism, no creative hallucination
+                temperature=0.0
             )
         )
 
-        # 5. Clean up Gemini server storage to avoid quota limits
+        # 5. Clean up Gemini server storage
         client.files.delete(name=uploaded_doc.name)
 
         # 6. Parse and return the JSON
         return json.loads(response.text)
 
     except Exception as e:
+        # Pass the exact Python error back to the Cloudflare frontend
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         # Clean up local temporary file
